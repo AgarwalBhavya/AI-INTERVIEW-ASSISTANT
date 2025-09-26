@@ -1,0 +1,1578 @@
+import React, { useState, useEffect, useRef } from "react";
+import { Upload, Card, Button, Input, Spin, Tabs, Table, Modal } from "antd";
+import { UploadOutlined, SendOutlined, RobotOutlined } from "@ant-design/icons";
+import * as pdfjsLib from "pdfjs-dist";
+import pdfjsWorker from "pdfjs-dist/build/pdf.worker?url";
+import localforage from "localforage";
+import "antd/dist/reset.css";
+import "./App.css";
+
+// PDF Worker
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
+
+const { Dragger } = Upload;
+
+// Validation Helpers
+const validateEmail = (email: string) => /^[a-zA-Z0-9._%+-]+@gmail\.com$/.test(email);
+const validatePhone = (phone: string) => /^\d{10}$/.test(phone);
+
+// Questions in order
+const questions = [
+  { level: "Easy", time: 20, text: "Explain the difference between let, const, and var in JS." },
+  { level: "Easy", time: 20, text: "What is JSX in React?" },
+  { level: "Medium", time: 60, text: "Explain the lifecycle methods of a React component." },
+  { level: "Medium", time: 60, text: "How does Node.js handle asynchronous operations?" },
+  { level: "Hard", time: 120, text: "Design a REST API for a todo app using Node.js and Express." },
+  { level: "Hard", time: 120, text: "Explain state management strategies in React for large applications." },
+];
+
+// Candidate Interface
+interface Candidate {
+  id: string;
+  name: string;
+  email: string;
+  phone: string;
+  answers: string[];
+  score?: number;
+  summary?: string;
+}
+
+const App: React.FC = () => {
+  const [activeTab, setActiveTab] = useState("interviewee");
+  const [messages, setMessages] = useState<{ sender: string; text: string }[]>([]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [resumeData, setResumeData] = useState<{ name: string; email: string; phone: string; fullText: string }>({
+    name: "",
+    email: "",
+    phone: "",
+    fullText: "",
+  });
+  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
+  const [timer, setTimer] = useState(0);
+  const [candidates, setCandidates] = useState<Candidate[]>([]);
+  const intervalRef = useRef<any>(null);
+  const sessionId = useRef<string>(Math.random().toString(36).substring(2, 10));
+
+  // Timer Effect (only runs for questions, not missing fields)
+  useEffect(() => {
+    if (
+      currentQuestionIndex <= questions.length &&
+      resumeData.name &&
+      validateEmail(resumeData.email) &&
+      validatePhone(resumeData.phone) &&
+      timer > 0
+    ) {
+      intervalRef.current = setInterval(() => setTimer((prev) => prev - 1), 1000);
+    } else if (timer === 0 && currentQuestionIndex <= questions.length && resumeData.name && validateEmail(resumeData.email) && validatePhone(resumeData.phone)) {
+      handleNextQuestion("");
+    }
+    return () => clearInterval(intervalRef.current);
+  }, [timer, currentQuestionIndex, resumeData]);
+
+  // Resume Upload (PDF only)
+  const handleResumeUpload = async (file: File) => {
+    const ext = file.name.split(".").pop()?.toLowerCase();
+    if (ext !== "pdf") {
+      alert("Only PDF files are supported currently!");
+      return false;
+    }
+
+    const buffer = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+    let textContent = "";
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const text = await page.getTextContent();
+      textContent += text.items.map((s: any) => s.str).join(" ") + "\n";
+    }
+
+    const nameMatch = textContent.match(/Name[:\s]+([A-Za-z\s]+)/i);
+    const emailMatch = textContent.match(/[a-zA-Z0-9._%+-]+@gmail\.com/);
+    const phoneMatch = textContent.match(/\b\d{10}\b/);
+
+    setResumeData({
+      name: nameMatch ? nameMatch[1].trim() : "",
+      email: emailMatch ? emailMatch[0] : "",
+      phone: phoneMatch ? phoneMatch[0] : "",
+      fullText: textContent,
+    });
+
+    alert("✅ Resume uploaded & parsed successfully!");
+    return false; // prevent auto-upload
+  };
+
+  // Prompt for missing fields (no timer)
+  useEffect(() => {
+    if (!resumeData.name) askCandidate("Please enter your full name:");
+    else if (!validateEmail(resumeData.email)) askCandidate("Please enter a valid Gmail address:");
+    else if (!validatePhone(resumeData.phone)) askCandidate("Please enter your 10-digit phone number:");
+    else if (currentQuestionIndex === 0 && messages.length === 0) {
+      // Start first question automatically after fields filled
+      setTimeout(() => handleNextQuestion(""), 500);
+    }
+  }, [resumeData]);
+
+  const askCandidate = (text: string) => {
+    setMessages([{ sender: "AI", text }]);
+  };
+
+  // Handle Candidate Input
+  const handleSendMessage = () => {
+    if (!input.trim()) return;
+
+    const newMsg = { sender: "You", text: input };
+    setMessages((prev) => [...prev, newMsg]);
+
+    // Handle missing fields first (no timer)
+    if (!resumeData.name) {
+      setResumeData((prev) => ({ ...prev, name: input }));
+      setInput("");
+      return;
+    } else if (!validateEmail(resumeData.email)) {
+      if (!validateEmail(input)) return alert("Enter valid Gmail!");
+      setResumeData((prev) => ({ ...prev, email: input }));
+      setInput("");
+      return;
+    } else if (!validatePhone(resumeData.phone)) {
+      if (!validatePhone(input)) return alert("Enter valid 10-digit phone!");
+      setResumeData((prev) => ({ ...prev, phone: input }));
+      setInput("");
+      return;
+    }
+
+    // Handle question-answer flow (with timer)
+    handleNextQuestion(input);
+    setInput("");
+  };
+
+  const handleNextQuestion = (answer: string) => {
+    // Save answer
+    if (currentQuestionIndex > 0) {
+      const updatedCandidates = [...candidates];
+      const candidate = updatedCandidates.find((c) => c.id === sessionId.current);
+      if (!candidate) {
+        updatedCandidates.push({
+          id: sessionId.current,
+          name: resumeData.name,
+          email: resumeData.email,
+          phone: resumeData.phone,
+          answers: [answer],
+        });
+      } else {
+        candidate.answers.push(answer);
+      }
+      setCandidates(updatedCandidates);
+      localforage.setItem("candidates", updatedCandidates); // persist only after finishing questions
+    }
+
+    // Move to next question
+    if (currentQuestionIndex < questions.length) {
+      const q = questions[currentQuestionIndex];
+      setMessages((prev) => [...prev, { sender: "AI", text: q.text }]);
+      setTimer(q.time); // start timer for question
+      setCurrentQuestionIndex((prev) => prev + 1);
+    } else {
+      finishInterview();
+    }
+  };
+
+  const finishInterview = () => {
+    const updatedCandidates = candidates.map((c) =>
+      c.id === sessionId.current
+        ? {
+            ...c,
+            score: Math.floor(Math.random() * 100),
+            summary: "Candidate shows good knowledge in React/Node.js",
+          }
+        : c
+    );
+    setCandidates(updatedCandidates);
+    localforage.setItem("candidates", updatedCandidates); // persist after finishing
+    setMessages((prev) => [...prev, { sender: "AI", text: "✅ Interview finished!" }]);
+    setTimer(0);
+    setCurrentQuestionIndex(questions.length + 1);
+  };
+
+  // Interviewer Table
+  const columns = [
+    { title: "Name", dataIndex: "name", key: "name" },
+    { title: "Email", dataIndex: "email", key: "email" },
+    { title: "Phone", dataIndex: "phone", key: "phone" },
+    { title: "Score", dataIndex: "score", key: "score" },
+    { title: "Summary", dataIndex: "summary", key: "summary" },
+  ];
+
+  return (
+    <div className="min-h-screen bg-gradient-to-r from-gray-100 to-gray-200 flex flex-col items-center justify-center p-6">
+      <Card
+        className="w-full max-w-5xl shadow-xl rounded-2xl p-6 bg-white"
+        title={
+          <div className="flex items-center space-x-2">
+            <RobotOutlined className="text-blue-500 text-xl" />
+            <span className="text-lg font-semibold">AI Interview Assistant</span>
+          </div>
+        }
+      >
+        <Tabs activeKey={activeTab} onChange={setActiveTab}>
+          <Tabs.TabPane tab="Interviewee" key="interviewee">
+            <div className="flex justify-center mb-4">
+              <Dragger
+                name="resume"
+                accept=".pdf"
+                beforeUpload={handleResumeUpload}
+                className="w-full max-w-md"
+              >
+                <p className="ant-upload-drag-icon">📄</p>
+                <p className="ant-upload-text font-medium">Click or drag resume (PDF) to upload</p>
+              </Dragger>
+            </div>
+
+            <div className="h-72 overflow-y-auto border rounded-lg p-4 mb-4 bg-gray-50">
+              {messages.map((msg, idx) => (
+                <div key={idx} className={`mb-2 ${msg.sender === "You" ? "text-right" : "text-left"}`}>
+                  <span
+                    className={`inline-block px-3 py-2 rounded-lg ${
+                      msg.sender === "You" ? "bg-blue-500 text-white" : "bg-gray-200 text-gray-900"
+                    }`}
+                  >
+                    <strong>{msg.sender}:</strong> {msg.text}
+                  </span>
+                </div>
+              ))}
+              {loading && (
+                <div className="flex justify-center mt-2">
+                  <Spin />
+                </div>
+              )}
+            </div>
+
+            <div className="flex space-x-2 mb-2">
+              <Input
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onPressEnter={handleSendMessage}
+                placeholder="Type your message..."
+                className="rounded-lg"
+              />
+              <Button type="primary" icon={<SendOutlined />} onClick={handleSendMessage} disabled={loading}>
+                Send
+              </Button>
+            </div>
+
+            {currentQuestionIndex <= questions.length &&
+              resumeData.name &&
+              validateEmail(resumeData.email) &&
+              validatePhone(resumeData.phone) &&
+              timer > 0 && (
+                <div className="text-center text-gray-700">Time left: {timer}s</div>
+              )}
+          </Tabs.TabPane>
+
+          <Tabs.TabPane tab="Interviewer Dashboard" key="interviewer">
+            <Table columns={columns} dataSource={candidates} rowKey="id" />
+          </Tabs.TabPane>
+        </Tabs>
+      </Card>
+    </div>
+  );
+};
+
+export default App;
+
+// import React, { useEffect, useRef, useState } from "react";
+// import {
+//   Tabs,
+//   Input,
+//   Button,
+//   Table,
+//   Modal,
+//   message,
+//   Progress,
+//   Card,
+//   Typography,
+//   Space,
+// } from "antd";
+// import type { ColumnsType } from "antd/es/table";
+// import { UploadOutlined } from "@ant-design/icons";
+// // import * as pdfjsLib from "pdfjs-dist";
+// import mammoth from "mammoth";
+// import "antd/dist/reset.css";
+// // Import pdfjs
+// import * as pdfjsLib from "pdfjs-dist";
+//
+// // Import worker bundle as a URL (Vite will handle it)
+// import pdfWorker from "pdfjs-dist/build/pdf.worker?url";
+// pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
+// // Tell pdfjs where the worker is
+// // (pdfjsLib as any).GlobalWorkerOptions.workerSrc = pdfWorker;
+// // console.log("Using pdf.worker from:", pdfWorker);
+//
+//
+// const { Title } = Typography;
+//
+// /** Vite-compatible worker URL for pdfjs */
+// (pdfjsLib as any).GlobalWorkerOptions.workerSrc = new URL(
+//   "pdfjs-dist/build/pdf.worker.min.js",
+//   import.meta.url
+// ).toString();
+//
+// /* ---------------- Types ---------------- */
+// interface Message {
+//   role: "user" | "ai";
+//   text: string;
+// }
+// interface Candidate {
+//   id: string;
+//   name: string;
+//   email: string;
+//   phone: string;
+//   score: number;
+//   summary: string;
+//   chatHistory: Message[];
+// }
+// type Difficulty = "easy" | "medium" | "hard";
+// interface Question {
+//   text: string;
+//   difficulty: Difficulty;
+//   time: number;
+// }
+//
+// /* ---------------- Questions ---------------- */
+// const questionBank: Question[] = [
+//   { text: "What is React, and how does it work?", difficulty: "easy", time: 20 },
+//   { text: "What is the difference between let, const, and var in JS?", difficulty: "easy", time: 20 },
+//   { text: "Explain the virtual DOM and why it’s useful.", difficulty: "medium", time: 60 },
+//   { text: "What are promises and async/await in Node.js?", difficulty: "medium", time: 60 },
+//   { text: "How would you optimize performance in a React app?", difficulty: "hard", time: 120 },
+//   { text: "Explain how Node.js handles asynchronous operations internally.", difficulty: "hard", time: 120 },
+// ];
+//
+// /* ---------------- App ---------------- */
+// export default function App(): JSX.Element {
+//   // chat + interview state (keeps your original logic)
+//   const [messages, setMessages] = useState<Message[]>([]);
+//   const [input, setInput] = useState<string>("");
+//   const [candidates, setCandidates] = useState<Candidate[]>(() => {
+//     const saved = localStorage.getItem("candidates");
+//     return saved ? JSON.parse(saved) : [];
+//   });
+//   const [selectedCandidate, setSelectedCandidate] = useState<Candidate | null>(null);
+//   const [welcomeBack, setWelcomeBack] = useState<boolean>(false);
+//
+//   const [name, setName] = useState<string>("");
+//   const [email, setEmail] = useState<string>("");
+//   const [phone, setPhone] = useState<string>("");
+//
+//   const [interviewStarted, setInterviewStarted] = useState<boolean>(false);
+//   const [currentQuestionIndex, setCurrentQuestionIndex] = useState<number>(0);
+//   const [timer, setTimer] = useState<number>(0);
+//   const timerRef = useRef<any>(null);
+//   const [answers, setAnswers] = useState<string[]>([]);
+//
+//   // resume parsing progress + preview text
+//   const [parsingProgress, setParsingProgress] = useState<number>(0);
+//   const [resumeTextPreview, setResumeTextPreview] = useState<string>("");
+//
+//   // hidden file input ref (more reliable)
+//   const fileInputRef = useRef<HTMLInputElement | null>(null);
+//
+//   /* Persistence (unchanged logic) */
+//   useEffect(() => {
+//     localStorage.setItem("candidates", JSON.stringify(candidates));
+//   }, [candidates]);
+//
+//   useEffect(() => {
+//     const saved = localStorage.getItem("interviewState");
+//     if (saved) {
+//       setWelcomeBack(true);
+//       const parsed = JSON.parse(saved);
+//       setMessages(parsed.messages || []);
+//       setName(parsed.name || "");
+//       setEmail(parsed.email || "");
+//       setPhone(parsed.phone || "");
+//       setInterviewStarted(parsed.interviewStarted || false);
+//       setCurrentQuestionIndex(parsed.currentQuestionIndex || 0);
+//       setTimer(parsed.timer || 0);
+//       setAnswers(parsed.answers || []);
+//     }
+//     // eslint-disable-next-line react-hooks/exhaustive-deps
+//   }, []);
+//
+//   useEffect(() => {
+//     const state = { messages, name, email, phone, interviewStarted, currentQuestionIndex, timer, answers };
+//     localStorage.setItem("interviewState", JSON.stringify(state));
+//   }, [messages, name, email, phone, interviewStarted, currentQuestionIndex, timer, answers]);
+//
+//   /* ---------------- File handling ---------------- */
+//
+//   // robust handler for the <input type="file">
+//   // const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+//   //   const file = e.target.files?.[0];
+//   //   if (!file) return;
+//   //   await processFile(file);
+//   //   // reset input so same file can be selected again if needed
+//   //   e.currentTarget.value = "";
+//   // };
+//   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+//   const file = e.target.files?.[0];
+//   if (!file) return;
+//   console.log("Selected file:", file.name, file.type, file.size);
+//
+//   await processFile(file);
+//
+//   // safer reset
+//   if (e.target) e.target.value = "";
+// };
+//
+//
+//   // helper: call when user clicks AntD button
+//   const onUploadButtonClick = () => {
+//     if (fileInputRef.current) fileInputRef.current.click();
+//   };
+//
+//   // main processing (PDF or DOCX)
+//   const processFile = async (file: File) => {
+//     setParsingProgress(0);
+//     setResumeTextPreview("");
+//     try {
+//       if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
+//         // PDF parsing using arrayBuffer (Vite-friendly)
+//         const arrayBuffer = await file.arrayBuffer();
+//         const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+//         const pdf = await loadingTask.promise;
+//         let fullText = "";
+//         for (let i = 1; i <= pdf.numPages; i++) {
+//           const page = await pdf.getPage(i);
+//           const content = await page.getTextContent();
+//           fullText += content.items.map((it: any) => it.str).join(" ") + "\n";
+//           setParsingProgress(Math.round((i / pdf.numPages) * 100));
+//         }
+//         setResumeTextPreview(fullText);
+//         extractAndSetFields(fullText);
+//         message.success("PDF parsed successfully");
+//       } else if (
+//         file.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+//         file.name.toLowerCase().endsWith(".docx")
+//       ) {
+//         // DOCX parsing with mammoth
+//         const ab = await file.arrayBuffer();
+//         const result = await mammoth.extractRawText({ arrayBuffer: ab });
+//         setResumeTextPreview(result.value);
+//         extractAndSetFields(result.value);
+//         setParsingProgress(100);
+//         message.success("DOCX parsed successfully");
+//       } else {
+//         message.error("Please upload a PDF or DOCX file.");
+//         setParsingProgress(0);
+//       }
+//     } catch (err) {
+//       console.error("parse error:", err);
+//       message.error("Failed to parse resume. See console for details.");
+//       setParsingProgress(0);
+//     }
+//   };
+//
+//   // naive contact extraction (keeps your earlier regex approach)
+//   const extractAndSetFields = (text: string) => {
+//     const nameMatch = text.match(/([A-Z][a-z]+(?:\s[A-Z][a-z]+){0,2})/);
+//     const emailMatch = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}/i);
+//     const phoneMatch = text.match(/(\+?\d[\d \-()]{7,}\d)/);
+//
+//     if (nameMatch && !name) setName(nameMatch[0].trim());
+//     if (emailMatch && !email) setEmail(emailMatch[0].trim());
+//     if (phoneMatch && !phone) setPhone(phoneMatch[0].trim());
+//   };
+//
+//   /* ---------------- Chat & Interview flow (preserved mostly as-is) ---------------- */
+//
+//   const handleSend = () => {
+//     if (!input.trim()) return;
+//     const newMessage: Message = { role: "user", text: input };
+//     setMessages((prev) => [...prev, newMessage]);
+//
+//     // If interview hasn't started → collect missing info
+//     if (!interviewStarted) {
+//       if (!name) setName(input);
+//       else if (!email) setEmail(input);
+//       else if (!phone) setPhone(input);
+//
+//       if (name && email && phone) {
+//         startInterview();
+//       } else {
+//         const missing = !name ? "your full name" : !email ? "your email" : "your phone number";
+//         const aiMessage: Message = { role: "ai", text: `Please provide ${missing} before we begin.` };
+//         setMessages((prev) => [...prev, aiMessage]);
+//       }
+//     } else {
+//       // Save answer (same behavior)
+//       const newAnswers = [...answers];
+//       newAnswers[currentQuestionIndex] = input;
+//       setAnswers(newAnswers);
+//     }
+//
+//     setInput("");
+//   };
+//
+//   const startInterview = () => {
+//     setInterviewStarted(true);
+//     setCurrentQuestionIndex(0);
+//     askQuestion(0);
+//   };
+//
+//   const askQuestion = (index: number) => {
+//     const q = questionBank[index];
+//     setMessages((prev) => [...prev, { role: "ai", text: `Q${index + 1}: ${q.text}` }]);
+//     setTimer(q.time);
+//   };
+//
+//   useEffect(() => {
+//     if (timer > 0 && interviewStarted) {
+//       timerRef.current = setTimeout(() => setTimer(timer - 1), 1000);
+//     } else if (timer === 0 && interviewStarted) {
+//       moveToNextQuestion();
+//     }
+//     return () => {
+//       if (timerRef.current) clearTimeout(timerRef.current);
+//     };
+//   }, [timer, interviewStarted]); // keep eslint ignore if needed
+//
+//   const moveToNextQuestion = () => {
+//     if (currentQuestionIndex + 1 < questionBank.length) {
+//       const next = currentQuestionIndex + 1;
+//       setCurrentQuestionIndex(next);
+//       askQuestion(next);
+//     } else {
+//       finishInterview();
+//     }
+//   };
+//
+//   const finishInterview = () => {
+//     const score = Math.floor(Math.random() * 101);
+//     const summary = `Candidate performed ${score > 70 ? "well" : "average"} with a score of ${score}.`;
+//     const newCandidate: Candidate = {
+//       id: Date.now().toString(),
+//       name,
+//       email,
+//       phone,
+//       score,
+//       summary,
+//       chatHistory: messages,
+//     };
+//     setCandidates((prev) => [...prev, newCandidate]);
+//     setMessages((prev) => [...prev, { role: "ai", text: "Interview complete! Thank you." }]);
+//     setInterviewStarted(false);
+//     // clear interview state persistence
+//     localStorage.removeItem("interviewState");
+//   };
+//
+//   /* ---------------- Interviewer table ---------------- */
+//   const columns: ColumnsType<Candidate> = [
+//     { title: "Name", dataIndex: "name", key: "name" },
+//     { title: "Email", dataIndex: "email", key: "email" },
+//     { title: "Phone", dataIndex: "phone", key: "phone" },
+//     { title: "Score", dataIndex: "score", key: "score", sorter: (a, b) => a.score - b.score },
+//     {
+//       title: "Action",
+//       key: "action",
+//       render: (_, record) => (
+//         <Button type="link" onClick={() => setSelectedCandidate(record)}>
+//           View
+//         </Button>
+//       ),
+//     },
+//   ];
+//
+//   /* ---------------- Layout styles: centered ---------------- */
+//   return (
+//     <div
+//       style={{
+//         minHeight: "100vh",
+//         background: "linear-gradient(90deg, #f0fbff 0%, #f9e9ff 50%, #fff7f4 100%)",
+//         display: "flex",
+//         justifyContent: "center",
+//         alignItems: "flex-start", // top center feel; change to center to vertically center
+//         padding: "40px 20px",
+//       }}
+//     >
+//       <div style={{ width: "100%", maxWidth: 920 }}>
+//         <Card
+//           style={{
+//             borderRadius: 14,
+//             boxShadow: "0 8px 30px rgba(16,24,40,0.08)",
+//             padding: 20,
+//             background: "#ffffff",
+//           }}
+//         >
+//           <Title level={2} style={{ textAlign: "left", marginBottom: 12 }}>
+//             🎯 AI Interview Assistant
+//           </Title>
+//
+//           <Tabs
+//             defaultActiveKey="1"
+//             items={[
+//               {
+//                 key: "1",
+//                 label: "Interviewee (Chat)",
+//                 children: (
+//                   <div>
+//                     {!interviewStarted && (
+//                       <div style={{ marginBottom: 12 }}>
+//                         <input
+//                           ref={fileInputRef}
+//                           type="file"
+//                           accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+//                           onChange={handleFileChange}
+//                           style={{ display: "none" }}
+//                         />
+//                         <Button icon={<UploadOutlined />} onClick={onUploadButtonClick}>
+//                           Upload Resume (PDF/DOCX)
+//                         </Button>
+//
+//                         {parsingProgress > 0 && parsingProgress < 100 && (
+//                           <div style={{ marginTop: 8 }}>
+//                             <Progress percent={parsingProgress} status="active" />
+//                           </div>
+//                         )}
+//
+//                         {/* extracted preview */}
+//                         {resumeTextPreview && (
+//                           <Card
+//                             size="small"
+//                             style={{ marginTop: 12, background: "#fafafa", maxHeight: 140, overflow: "auto" }}
+//                           >
+//                             <strong>Extracted Preview:</strong>
+//                             <div style={{ marginTop: 6, whiteSpace: "pre-wrap", fontSize: 13 }}>
+//                               {resumeTextPreview.slice(0, 1500)}
+//                             </div>
+//                             <div style={{ marginTop: 8 }}>
+//                               <strong>Detected:</strong>{" "}
+//                               <span style={{ marginLeft: 8 }}>
+//                                 {name ? `Name: ${name}` : "Name: —"} • {email ? `Email: ${email}` : "Email: —"} •{" "}
+//                                 {phone ? `Phone: ${phone}` : "Phone: —"}
+//                               </span>
+//                             </div>
+//                           </Card>
+//                         )}
+//                       </div>
+//                     )}
+//
+//                     <Card
+//                       size="small"
+//                       style={{
+//                         height: 420,
+//                         overflowY: "auto",
+//                         marginBottom: 12,
+//                         background: "#fbfbfb",
+//                         padding: 16,
+//                         borderRadius: 10,
+//                       }}
+//                     >
+//                       {messages.length === 0 && (
+//                         <div style={{ color: "#666" }}>
+//                           Upload resume or enter your details to begin the interview.
+//                         </div>
+//                       )}
+//                       {messages.map((msg, idx) => (
+//                         <div
+//                           key={idx}
+//                           style={{
+//                             display: "flex",
+//                             justifyContent: msg.role === "user" ? "flex-end" : "flex-start",
+//                             marginBottom: 10,
+//                           }}
+//                         >
+//                           <div
+//                             style={{
+//                               maxWidth: "78%",
+//                               padding: "10px 14px",
+//                               borderRadius: 14,
+//                               background: msg.role === "user" ? "#1890ff" : "#f0f0f0",
+//                               color: msg.role === "user" ? "#fff" : "#111",
+//                               boxShadow: "0 2px 6px rgba(16,24,40,0.04)",
+//                               fontSize: 14,
+//                               lineHeight: 1.4,
+//                             }}
+//                           >
+//                             <strong style={{ display: "block", marginBottom: 6, fontSize: 12 }}>
+//                               {msg.role === "user" ? "You" : "AI"}:
+//                             </strong>
+//                             <div>{msg.text}</div>
+//                           </div>
+//                         </div>
+//                       ))}
+//                     </Card>
+//
+//                     {interviewStarted && (
+//                       <div style={{ marginBottom: 12 }}>
+//                         <Progress
+//                           percent={
+//                             questionBank[currentQuestionIndex]
+//                               ? (timer / questionBank[currentQuestionIndex].time) * 100
+//                               : 0
+//                           }
+//                           showInfo={false}
+//                         />
+//                         <div style={{ marginTop: 6, marginBottom: 6 }}>Time left: {timer}s</div>
+//                       </div>
+//                     )}
+//
+//                     <Space.Compact style={{ width: "100%" }}>
+//                       <Input
+//                         value={input}
+//                         onChange={(e) => setInput(e.target.value)}
+//                         onPressEnter={handleSend}
+//                         placeholder="Type your answer..."
+//                       />
+//                       <Button type="primary" onClick={handleSend}>
+//                         Send
+//                       </Button>
+//                     </Space.Compact>
+//                   </div>
+//                 ),
+//               },
+//               {
+//                 key: "2",
+//                 label: "Interviewer (Dashboard)",
+//                 children: (
+//                   <div>
+//                     <Table
+//                       columns={columns}
+//                       dataSource={candidates}
+//                       rowKey="id"
+//                       pagination={{ pageSize: 5 }}
+//                     />
+//
+//                     {selectedCandidate && (
+//                       <Modal
+//                         open={true}
+//                         onCancel={() => setSelectedCandidate(null)}
+//                         footer={null}
+//                         title={`Candidate: ${selectedCandidate.name}`}
+//                       >
+//                         <p>
+//                           <strong>Email:</strong> {selectedCandidate.email}
+//                         </p>
+//                         <p>
+//                           <strong>Phone:</strong> {selectedCandidate.phone}
+//                         </p>
+//                         <p>
+//                           <strong>Score:</strong> {selectedCandidate.score}
+//                         </p>
+//                         <p>
+//                           <strong>Summary:</strong> {selectedCandidate.summary}
+//                         </p>
+//                         <h4>Chat History</h4>
+//                         <div
+//                           style={{
+//                             maxHeight: 260,
+//                             overflowY: "auto",
+//                             border: "1px solid #eee",
+//                             padding: 10,
+//                             borderRadius: 6,
+//                           }}
+//                         >
+//                           {selectedCandidate.chatHistory.map((msg, idx) => (
+//                             <div key={idx} style={{ marginBottom: 8 }}>
+//                               <strong>{msg.role === "user" ? "You" : "AI"}:</strong> {msg.text}
+//                             </div>
+//                           ))}
+//                         </div>
+//                       </Modal>
+//                     )}
+//                   </div>
+//                 ),
+//               },
+//             ]}
+//           />
+//         </Card>
+//
+//         {/* Welcome Back modal */}
+//         <Modal
+//           open={welcomeBack}
+//           onOk={() => setWelcomeBack(false)}
+//           onCancel={() => setWelcomeBack(false)}
+//           title="Welcome Back!"
+//         >
+//           <p>You have an unfinished session. Would you like to continue?</p>
+//         </Modal>
+//       </div>
+//     </div>
+//   );
+// }
+
+// import React, { useState, useEffect, useRef } from "react";
+// import { Upload, Card, Button, Input, Spin, Tabs, Table, Modal } from "antd";
+// import { UploadOutlined, SendOutlined, RobotOutlined } from "@ant-design/icons";
+// import * as pdfjsLib from "pdfjs-dist";
+// import pdfjsWorker from "pdfjs-dist/build/pdf.worker?url";
+// import localforage from "localforage";
+// import "antd/dist/reset.css";
+// import "./App.css";
+//
+// // PDF Worker
+// pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
+//
+// const { Dragger } = Upload;
+//
+// // Validation Helpers
+// const validateEmail = (email: string) => /^[a-zA-Z0-9._%+-]+@gmail\.com$/.test(email);
+// const validatePhone = (phone: string) => /^\d{10}$/.test(phone);
+//
+// // Mock AI Questions
+// const questions = [
+//   { level: "Easy", time: 20, text: "Explain the difference between let, const, and var in JS." },
+//   { level: "Easy", time: 20, text: "What is JSX in React?" },
+//   { level: "Medium", time: 60, text: "Explain the lifecycle methods of a React component." },
+//   { level: "Medium", time: 60, text: "How does Node.js handle asynchronous operations?" },
+//   { level: "Hard", time: 120, text: "Design a REST API for a todo app using Node.js and Express." },
+//   { level: "Hard", time: 120, text: "Explain state management strategies in React for large applications." },
+// ];
+//
+// // Candidate Interface
+// interface Candidate {
+//   id: string;
+//   name: string;
+//   email: string;
+//   phone: string;
+//   answers: string[];
+//   score?: number;
+//   summary?: string;
+// }
+//
+// const App: React.FC = () => {
+//   const [activeTab, setActiveTab] = useState("interviewee");
+//   const [messages, setMessages] = useState<{ sender: string; text: string }[]>([]);
+//   const [input, setInput] = useState("");
+//   const [loading, setLoading] = useState(false);
+//   const [resumeData, setResumeData] = useState<{ name: string; email: string; phone: string; fullText: string }>({
+//     name: "",
+//     email: "",
+//     phone: "",
+//     fullText: "",
+//   });
+//   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
+//   const [timer, setTimer] = useState(0);
+//   const [candidates, setCandidates] = useState<Candidate[]>([]);
+//   const intervalRef = useRef<any>(null);
+//   const sessionId = useRef<string>(Math.random().toString(36).substring(2, 10));
+//
+//   // Load saved session
+//   useEffect(() => {
+//     const loadSession = async () => {
+//       const savedSession: any = await localforage.getItem("currentSession");
+//       const savedCandidates: any = await localforage.getItem("candidates");
+//
+//       if (savedSession) {
+//         Modal.info({ title: "Welcome Back", content: "Resume your interview session?" });
+//         setMessages(savedSession.messages);
+//         setResumeData(savedSession.resumeData);
+//         setCurrentQuestionIndex(savedSession.currentQuestionIndex);
+//         setTimer(savedSession.timer);
+//       }
+//       if (savedCandidates) setCandidates(savedCandidates);
+//     };
+//     loadSession();
+//   }, []);
+//
+//   // Save session
+//   useEffect(() => {
+//     localforage.setItem("currentSession", {
+//       messages,
+//       resumeData,
+//       currentQuestionIndex,
+//       timer,
+//     });
+//   }, [messages, resumeData, currentQuestionIndex, timer]);
+//
+//   // Timer Effect
+//   useEffect(() => {
+//     if (currentQuestionIndex < questions.length && timer > 0) {
+//       intervalRef.current = setInterval(() => setTimer((prev) => prev - 1), 1000);
+//     } else if (timer === 0 && currentQuestionIndex < questions.length) {
+//       handleNextQuestion("");
+//     }
+//     return () => clearInterval(intervalRef.current);
+//   }, [timer, currentQuestionIndex]);
+//
+//   // Resume Upload
+//   const handleResumeUpload = async (file: File) => {
+//     const ext = file.name.split(".").pop()?.toLowerCase();
+//     let textContent = "";
+//
+//     if (ext === "pdf") {
+//       const buffer = await file.arrayBuffer();
+//       const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+//       for (let i = 1; i <= pdf.numPages; i++) {
+//         const page = await pdf.getPage(i);
+//         const text = await page.getTextContent();
+//         textContent += text.items.map((s: any) => s.str).join(" ") + "\n";
+//       }
+//     } else {
+//       alert("Only PDF files are supported currently!");
+//       return false;
+//     }
+//
+//     const nameMatch = textContent.match(/Name[:\s]+([A-Za-z\s]+)/i);
+//     const emailMatch = textContent.match(/[a-zA-Z0-9._%+-]+@gmail\.com/);
+//     const phoneMatch = textContent.match(/\b\d{10}\b/);
+//
+//     setResumeData({
+//       name: nameMatch ? nameMatch[1].trim() : "",
+//       email: emailMatch ? emailMatch[0] : "",
+//       phone: phoneMatch ? phoneMatch[0] : "",
+//       fullText: textContent,
+//     });
+//
+//     alert("✅ Resume uploaded & parsed successfully!");
+//     return false; // prevent auto-upload
+//   };
+//   useEffect(() => {
+//   // Only start timer if all mandatory fields are filled and there are remaining questions
+//   if (currentQuestionIndex < questions.length && resumeData.name && validateEmail(resumeData.email) && validatePhone(resumeData.phone) && timer > 0) {
+//     intervalRef.current = setInterval(() => setTimer((prev) => prev - 1), 1000);
+//   } else if (timer === 0 && currentQuestionIndex < questions.length) {
+//     handleNextQuestion(""); // auto-submit empty answer
+//   }
+//   return () => clearInterval(intervalRef.current);
+// }, [timer, currentQuestionIndex, resumeData]);
+//
+//
+//   // Ask missing fields
+//   // useEffect(() => {
+//   //   if (!resumeData.name) askCandidate("Please enter your full name:");
+//   //   else if (!validateEmail(resumeData.email)) askCandidate("Please enter a valid Gmail address:");
+//   //   else if (!validatePhone(resumeData.phone)) askCandidate("Please enter your 10-digit phone number:");
+//   // }, [resumeData]);
+//
+//   const askCandidate = (text: string) => {
+//     setMessages([{ sender: "AI", text }]);
+//   };
+//
+//   // Handle Candidate Input
+//   // const handleSendMessage = () => {
+//   //   if (!input.trim()) return;
+//   //
+//   //   const newMsg = { sender: "You", text: input };
+//   //   setMessages((prev) => [...prev, newMsg]);
+//   //
+//   //   // Validate missing fields
+//   //   if (!resumeData.name) {
+//   //     setResumeData((prev) => ({ ...prev, name: input }));
+//   //     setInput("");
+//   //     return;
+//   //   } else if (!validateEmail(resumeData.email)) {
+//   //     if (!validateEmail(input)) return alert("Enter valid Gmail!");
+//   //     setResumeData((prev) => ({ ...prev, email: input }));
+//   //     setInput("");
+//   //     return;
+//   //   } else if (!validatePhone(resumeData.phone)) {
+//   //     if (!validatePhone(input)) return alert("Enter valid 10-digit phone!");
+//   //     setResumeData((prev) => ({ ...prev, phone: input }));
+//   //     setInput("");
+//   //     return;
+//   //   }
+//   const handleSendMessage = () => {
+//   if (!input.trim()) return;
+//
+//   const newMsg = { sender: "You", text: input };
+//   setMessages((prev) => [...prev, newMsg]);
+//
+//   // Handle missing fields first (no timer)
+//   if (!resumeData.name) {
+//     setResumeData((prev) => ({ ...prev, name: input }));
+//     setInput("");
+//     return;
+//   } else if (!validateEmail(resumeData.email)) {
+//     if (!validateEmail(input)) return alert("Enter valid Gmail!");
+//     setResumeData((prev) => ({ ...prev, email: input }));
+//     setInput("");
+//     return;
+//   } else if (!validatePhone(resumeData.phone)) {
+//     if (!validatePhone(input)) return alert("Enter valid 10-digit phone!");
+//     setResumeData((prev) => ({ ...prev, phone: input }));
+//     setInput("");
+//     return;
+//   }
+//
+//   // After mandatory fields, handle question-answer flow with timers
+//   handleNextQuestion(input);
+//   setInput("");
+// };
+//
+//
+//     // Handle Question Answering
+//
+//   // const handleNextQuestion = (answer: string) => {
+//   //   if (currentQuestionIndex > 0) {
+//   //     const updatedCandidates = [...candidates];
+//   //     if (!updatedCandidates.find((c) => c.id === sessionId.current))
+//   //       updatedCandidates.push({
+//   //         id: sessionId.current,
+//   //         name: resumeData.name,
+//   //         email: resumeData.email,
+//   //         phone: resumeData.phone,
+//   //         answers: [answer],
+//   //       });
+//   //     else {
+//   //       updatedCandidates.find((c) => c.id === sessionId.current)?.answers.push(answer);
+//   //     }
+//   //     setCandidates(updatedCandidates);
+//   //     localforage.setItem("candidates", updatedCandidates);
+//   //   }
+//   //
+//   //   if (currentQuestionIndex < questions.length) {
+//   //     const q = questions[currentQuestionIndex];
+//   //     setMessages((prev) => [...prev, { sender: "AI", text: q.text }]);
+//   //     setTimer(q.time);
+//   //     setCurrentQuestionIndex((prev) => prev + 1);
+//   //   } else {
+//   //     finishInterview();
+//   //   }
+//   // };
+//   const handleNextQuestion = (answer: string) => {
+//   // Save answer for current session
+//   if (currentQuestionIndex > 0) {
+//     const updatedCandidates = [...candidates];
+//     const candidate = updatedCandidates.find((c) => c.id === sessionId.current);
+//     if (!candidate) {
+//       updatedCandidates.push({
+//         id: sessionId.current,
+//         name: resumeData.name,
+//         email: resumeData.email,
+//         phone: resumeData.phone,
+//         answers: [answer],
+//       });
+//     } else {
+//       candidate.answers.push(answer);
+//     }
+//     setCandidates(updatedCandidates);
+//     localforage.setItem("candidates", updatedCandidates);
+//   }
+//
+//   // Move to next question
+//   if (currentQuestionIndex < questions.length) {
+//     const q = questions[currentQuestionIndex];
+//     setMessages((prev) => [...prev, { sender: "AI", text: q.text }]);
+//     setTimer(q.time); // set timer based on question difficulty
+//     setCurrentQuestionIndex((prev) => prev + 1);
+//   } else {
+//     finishInterview();
+//   }
+// };
+//
+//
+//   const finishInterview = () => {
+//     const updatedCandidates = candidates.map((c) =>
+//       c.id === sessionId.current
+//         ? {
+//             ...c,
+//             score: Math.floor(Math.random() * 100),
+//             summary: "Candidate shows good knowledge in React/Node.js",
+//           }
+//         : c
+//     );
+//     setCandidates(updatedCandidates);
+//     localforage.setItem("candidates", updatedCandidates);
+//     setMessages((prev) => [...prev, { sender: "AI", text: "✅ Interview finished!" }]);
+//     setTimer(0);
+//   };
+//
+//   // Interviewer Table Columns
+//   const columns = [
+//     { title: "Name", dataIndex: "name", key: "name" },
+//     { title: "Email", dataIndex: "email", key: "email" },
+//     { title: "Phone", dataIndex: "phone", key: "phone" },
+//     { title: "Score", dataIndex: "score", key: "score" },
+//     { title: "Summary", dataIndex: "summary", key: "summary" },
+//   ];
+//
+//   return (
+//     <div className="min-h-screen bg-gradient-to-r from-gray-100 to-gray-200 flex flex-col items-center justify-center p-6">
+//       <Card
+//         className="w-full max-w-5xl shadow-xl rounded-2xl p-6 bg-white"
+//         title={
+//           <div className="flex items-center space-x-2">
+//             <RobotOutlined className="text-blue-500 text-xl" />
+//             <span className="text-lg font-semibold">AI Interview Assistant</span>
+//           </div>
+//         }
+//       >
+//         <Tabs activeKey={activeTab} onChange={setActiveTab}>
+//           <Tabs.TabPane tab="Interviewee" key="interviewee">
+//             <div className="flex justify-center mb-4">
+//               <Dragger
+//                 name="resume"
+//                 accept=".pdf"
+//                 beforeUpload={handleResumeUpload}
+//                 className="w-full max-w-md"
+//               >
+//                 <p className="ant-upload-drag-icon">📄</p>
+//                 <p className="ant-upload-text font-medium">Click or drag resume (PDF) to upload</p>
+//               </Dragger>
+//             </div>
+//
+//             <div className="h-72 overflow-y-auto border rounded-lg p-4 mb-4 bg-gray-50">
+//               {messages.map((msg, idx) => (
+//                 <div key={idx} className={`mb-2 ${msg.sender === "You" ? "text-right" : "text-left"}`}>
+//                   <span
+//                     className={`inline-block px-3 py-2 rounded-lg ${
+//                       msg.sender === "You" ? "bg-blue-500 text-white" : "bg-gray-200 text-gray-900"
+//                     }`}
+//                   >
+//                     <strong>{msg.sender}:</strong> {msg.text}
+//                   </span>
+//                 </div>
+//               ))}
+//               {loading && (
+//                 <div className="flex justify-center mt-2">
+//                   <Spin />
+//                 </div>
+//               )}
+//             </div>
+//
+//             <div className="flex space-x-2 mb-2">
+//               <Input
+//                 value={input}
+//                 onChange={(e) => setInput(e.target.value)}
+//                 onPressEnter={handleSendMessage}
+//                 placeholder="Type your message..."
+//                 className="rounded-lg"
+//               />
+//               <Button type="primary" icon={<SendOutlined />} onClick={handleSendMessage} disabled={loading}>
+//                 Send
+//               </Button>
+//             </div>
+//             {currentQuestionIndex <= questions.length && timer > 0 && (
+//               <div className="text-center text-gray-700">Time left: {timer}s</div>
+//             )}
+//           </Tabs.TabPane>
+//
+//           <Tabs.TabPane tab="Interviewer Dashboard" key="interviewer">
+//             <Table columns={columns} dataSource={candidates} rowKey="id" />
+//           </Tabs.TabPane>
+//         </Tabs>
+//       </Card>
+//     </div>
+//   );
+// };
+//
+// export default App;
+
+
+
+
+
+// import { useState, useEffect, useRef } from "react";
+// import {
+//   Tabs,
+//   Input,
+//   Button,
+//   Table,
+//   Modal,
+//   Upload,
+//   message,
+//   Progress,
+//   Card,
+//   Typography,
+// } from "antd";
+// import type { ColumnsType } from "antd/es/table";
+// import { UploadOutlined } from "@ant-design/icons";
+// // import * as pdfjsLib from "pdfjs-dist";
+// import "antd/dist/reset.css";
+// import * as pdfjsLib from "pdfjs-dist";
+//
+// pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+//   "pdfjs-dist/build/pdf.worker.min.js",
+//   import.meta.url
+// ).toString();
+//
+//
+// const { Title } = Typography;
+//
+// // Configure PDF.js worker
+// (pdfjsLib as any).GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
+//
+// // ------------------ Types ------------------
+// interface Message {
+//   role: "user" | "ai";
+//   text: string;
+// }
+//
+// interface Candidate {
+//   id: string;
+//   name: string;
+//   email: string;
+//   phone: string;
+//   score: number;
+//   summary: string;
+//   chatHistory: Message[];
+// }
+//
+// type Difficulty = "easy" | "medium" | "hard";
+//
+// interface Question {
+//   text: string;
+//   difficulty: Difficulty;
+//   time: number; // seconds
+// }
+//
+// // ------------------ Fake AI Question Bank ------------------
+// const questionBank: Question[] = [
+//   { text: "What is React, and how does it work?", difficulty: "easy", time: 20 },
+//   { text: "What is the difference between let, const, and var in JS?", difficulty: "easy", time: 20 },
+//   { text: "Explain the virtual DOM and why it’s useful.", difficulty: "medium", time: 60 },
+//   { text: "What are promises and async/await in Node.js?", difficulty: "medium", time: 60 },
+//   { text: "How would you optimize performance in a React app?", difficulty: "hard", time: 120 },
+//   { text: "Explain how Node.js handles asynchronous operations internally.", difficulty: "hard", time: 120 },
+// ];
+//
+// // ------------------ Main App ------------------
+// function App() {
+//   const [messages, setMessages] = useState<Message[]>([]);
+//   const [input, setInput] = useState<string>("");
+//   const [candidates, setCandidates] = useState<Candidate[]>(() => {
+//     const saved = localStorage.getItem("candidates");
+//     return saved ? JSON.parse(saved) : [];
+//   });
+//   const [selectedCandidate, setSelectedCandidate] = useState<Candidate | null>(null);
+//   const [welcomeBack, setWelcomeBack] = useState<boolean>(false);
+//
+//   // Candidate profile info
+//   const [name, setName] = useState<string>("");
+//   const [email, setEmail] = useState<string>("");
+//   const [phone, setPhone] = useState<string>("");
+//
+//   // Interview state
+//   const [interviewStarted, setInterviewStarted] = useState<boolean>(false);
+//   const [currentQuestionIndex, setCurrentQuestionIndex] = useState<number>(0);
+//   const [timer, setTimer] = useState<number>(0);
+//   const timerRef = useRef<NodeJS.Timeout | null>(null);
+//   const [answers, setAnswers] = useState<string[]>([]);
+//
+//   // Resume parsing progress
+//   const [progress, setProgress] = useState<number>(0);
+//
+//   // ------------------ Persistence ------------------
+//   useEffect(() => {
+//     localStorage.setItem("candidates", JSON.stringify(candidates));
+//   }, [candidates]);
+//
+//   useEffect(() => {
+//     const saved = localStorage.getItem("interviewState");
+//     if (saved) {
+//       setWelcomeBack(true);
+//       const parsed = JSON.parse(saved);
+//       setMessages(parsed.messages || []);
+//       setName(parsed.name || "");
+//       setEmail(parsed.email || "");
+//       setPhone(parsed.phone || "");
+//       setInterviewStarted(parsed.interviewStarted || false);
+//       setCurrentQuestionIndex(parsed.currentQuestionIndex || 0);
+//       setTimer(parsed.timer || 0);
+//       setAnswers(parsed.answers || []);
+//     }
+//   }, []);
+//
+//   useEffect(() => {
+//     const state = { messages, name, email, phone, interviewStarted, currentQuestionIndex, timer, answers };
+//     localStorage.setItem("interviewState", JSON.stringify(state));
+//   }, [messages, name, email, phone, interviewStarted, currentQuestionIndex, timer, answers]);
+//
+//   // ------------------ Resume Upload ------------------
+//   const handleResumeUpload = async (file: File) => {
+//     if (!["application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"].includes(file.type)) {
+//       message.error("Only PDF or DOCX allowed!");
+//       return false;
+//     }
+//
+//     if (file.type === "application/pdf") {
+//       const arrayBuffer = await file.arrayBuffer();
+//       const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+//       let text = "";
+//
+//       for (let i = 1; i <= pdf.numPages; i++) {
+//         const page = await pdf.getPage(i);
+//         const content = await page.getTextContent();
+//         text += content.items.map((s: any) => s.str).join(" ");
+//         setProgress(Math.round((i / pdf.numPages) * 100));
+//       }
+//
+//       const nameMatch = text.match(/([A-Z][a-z]+ [A-Z][a-z]+)/);
+//       const emailMatch = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}/);
+//       const phoneMatch = text.match(/(\+?\d{10,13})/);
+//
+//       if (nameMatch) setName(nameMatch[0]);
+//       if (emailMatch) setEmail(emailMatch[0]);
+//       if (phoneMatch) setPhone(phoneMatch[0]);
+//
+//       message.success("Resume uploaded and parsed!");
+//     }
+//
+//     return false; // prevent auto-upload
+//   };
+//
+//   // ------------------ Chat Flow ------------------
+//   const handleSend = () => {
+//     if (!input.trim()) return;
+//     const newMessage: Message = { role: "user", text: input };
+//     setMessages((prev) => [...prev, newMessage]);
+//
+//     if (!interviewStarted) {
+//       if (!name) setName(input);
+//       else if (!email) setEmail(input);
+//       else if (!phone) setPhone(input);
+//
+//       if (name && email && phone) {
+//         startInterview();
+//       } else {
+//         const missing = !name ? "your full name" : !email ? "your email" : "your phone number";
+//         const aiMessage: Message = { role: "ai", text: `Please provide ${missing} before we begin.` };
+//         setMessages((prev) => [...prev, aiMessage]);
+//       }
+//     } else {
+//       const newAnswers = [...answers];
+//       newAnswers[currentQuestionIndex] = input;
+//       setAnswers(newAnswers);
+//     }
+//
+//     setInput("");
+//   };
+//
+//   // ------------------ Interview Flow ------------------
+//   const startInterview = () => {
+//     setInterviewStarted(true);
+//     setCurrentQuestionIndex(0);
+//     askQuestion(0);
+//   };
+//
+//   const askQuestion = (index: number) => {
+//     const q = questionBank[index];
+//     setMessages((prev) => [...prev, { role: "ai", text: `Q${index + 1}: ${q.text}` }]);
+//     setTimer(q.time);
+//   };
+//
+//   useEffect(() => {
+//     if (timer > 0 && interviewStarted) {
+//       timerRef.current = setTimeout(() => setTimer(timer - 1), 1000);
+//     } else if (timer === 0 && interviewStarted) {
+//       moveToNextQuestion();
+//     }
+//     return () => {
+//       if (timerRef.current) clearTimeout(timerRef.current);
+//     };
+//   }, [timer, interviewStarted]);
+//
+//   const moveToNextQuestion = () => {
+//     if (currentQuestionIndex + 1 < questionBank.length) {
+//       setCurrentQuestionIndex((prev) => prev + 1);
+//       askQuestion(currentQuestionIndex + 1);
+//     } else {
+//       finishInterview();
+//     }
+//   };
+//
+//   const finishInterview = () => {
+//     const score = Math.floor(Math.random() * 101);
+//     const summary = `Candidate performed ${score > 70 ? "well" : "average"} with a score of ${score}.`;
+//     const newCandidate: Candidate = {
+//       id: Date.now().toString(),
+//       name,
+//       email,
+//       phone,
+//       score,
+//       summary,
+//       chatHistory: messages,
+//     };
+//     setCandidates((prev) => [...prev, newCandidate]);
+//     setMessages((prev) => [...prev, { role: "ai", text: "Interview complete! Thank you." }]);
+//     setInterviewStarted(false);
+//     localStorage.removeItem("interviewState");
+//   };
+//
+//   // ------------------ Interviewer Dashboard ------------------
+//   const columns: ColumnsType<Candidate> = [
+//     { title: "Name", dataIndex: "name", key: "name" },
+//     { title: "Email", dataIndex: "email", key: "email" },
+//     { title: "Phone", dataIndex: "phone", key: "phone" },
+//     { title: "Score", dataIndex: "score", key: "score", sorter: (a, b) => a.score - b.score },
+//     {
+//       title: "Action",
+//       key: "action",
+//       render: (_, record) => (
+//         <Button type="link" onClick={() => setSelectedCandidate(record)}>
+//           View
+//         </Button>
+//       ),
+//     },
+//   ];
+//
+//   return (
+//     <div
+//       style={{
+//         minHeight: "100vh",
+//         background: "linear-gradient(to right, #e0f7fa, #e1bee7)",
+//         display: "flex",
+//         justifyContent: "center",
+//         alignItems: "center",
+//         padding: "2rem",
+//       }}
+//     >
+//
+//       {/* Welcome Back Modal */}
+//       <Modal
+//         open={welcomeBack}
+//         onOk={() => setWelcomeBack(false)}
+//         onCancel={() => setWelcomeBack(false)}
+//         title="Welcome Back!"
+//       >
+//         <p>You have an unfinished session. Would you like to continue?</p>
+//       </Modal>
+//
+//       <Card
+//         style={{
+//           maxWidth: 900,
+//           margin: "0 auto",
+//           padding: "2rem",
+//           borderRadius: "16px",
+//           boxShadow: "0 4px 20px rgba(0,0,0,0.1)",
+//         }}
+//       >
+//         <Title level={2} style={{ textAlign: "center", marginBottom: "1rem" }}>
+//           🎯 AI Interview Assistant
+//         </Title>
+//
+//         <Tabs
+//           defaultActiveKey="1"
+//           items={[
+//             {
+//               key: "1",
+//               label: "Interviewee (Chat)",
+//               children: (
+//                 <div>
+//                   {!interviewStarted && (
+//                     <div style={{ marginBottom: "1rem" }}>
+//                       <Upload beforeUpload={handleResumeUpload} showUploadList={false}>
+//                         <Button icon={<UploadOutlined />}>Upload Resume (PDF/DOCX)</Button>
+//                       </Upload>
+//                       {progress > 0 && <Progress percent={progress} status="active" />}
+//                     </div>
+//                   )}
+//
+//                   <Card
+//                     size="small"
+//                     style={{
+//                       height: 400,
+//                       overflowY: "auto",
+//                       marginBottom: "1rem",
+//                       background: "#fafafa",
+//                     }}
+//                   >
+//                     {messages.map((msg, idx) => (
+//                       <div
+//                         key={idx}
+//                         style={{
+//                           textAlign: msg.role === "user" ? "right" : "left",
+//                           margin: "8px 0",
+//                         }}
+//                       >
+//                         <span
+//                           style={{
+//                             display: "inline-block",
+//                             padding: "8px 12px",
+//                             borderRadius: "12px",
+//                             background: msg.role === "user" ? "#1890ff" : "#e0e0e0",
+//                             color: msg.role === "user" ? "white" : "black",
+//                           }}
+//                         >
+//                           <strong>{msg.role === "user" ? "You" : "AI"}:</strong> {msg.text}
+//                         </span>
+//                       </div>
+//                     ))}
+//                   </Card>
+//
+//                   {interviewStarted && (
+//                     <div style={{ marginBottom: 10 }}>
+//                       <Progress
+//                         percent={(timer / questionBank[currentQuestionIndex].time) * 100}
+//                         showInfo={false}
+//                       />
+//                       <p>Time left: {timer}s</p>
+//                     </div>
+//                   )}
+//
+//                   <Input.Group compact>
+//                     <Input
+//                       style={{ width: "80%" }}
+//                       value={input}
+//                       onChange={(e) => setInput(e.target.value)}
+//                       onPressEnter={handleSend}
+//                       placeholder="Type your answer..."
+//                     />
+//                     <Button type="primary" onClick={handleSend}>
+//                       Send
+//                     </Button>
+//                   </Input.Group>
+//                 </div>
+//               ),
+//             },
+//             {
+//               key: "2",
+//               label: "Interviewer (Dashboard)",
+//               children: (
+//                 <div>
+//                   <Table
+//                     columns={columns}
+//                     dataSource={candidates}
+//                     rowKey="id"
+//                     pagination={{ pageSize: 5 }}
+//                   />
+//
+//                   {selectedCandidate && (
+//                     <Modal
+//                       open={true}
+//                       onCancel={() => setSelectedCandidate(null)}
+//                       footer={null}
+//                       title={`Candidate: ${selectedCandidate.name}`}
+//                     >
+//                       <p>
+//                         <strong>Email:</strong> {selectedCandidate.email}
+//                       </p>
+//                       <p>
+//                         <strong>Phone:</strong> {selectedCandidate.phone}
+//                       </p>
+//                       <p>
+//                         <strong>Score:</strong> {selectedCandidate.score}
+//                       </p>
+//                       <p>
+//                         <strong>Summary:</strong> {selectedCandidate.summary}
+//                       </p>
+//                       <h4>Chat History</h4>
+//                       <div
+//                         style={{
+//                           maxHeight: 200,
+//                           overflowY: "auto",
+//                           border: "1px solid #ddd",
+//                           padding: 10,
+//                           borderRadius: 6,
+//                         }}
+//                       >
+//                         {selectedCandidate.chatHistory.map((msg, idx) => (
+//                           <div key={idx}>
+//                             <strong>{msg.role === "user" ? "You" : "AI"}:</strong> {msg.text}
+//                           </div>
+//                         ))}
+//                       </div>
+//                     </Modal>
+//                   )}
+//                 </div>
+//               ),
+//             },
+//           ]}
+//         />
+//       </Card>
+//     </div>
+//   );
+// }
+//
+// export default App;
