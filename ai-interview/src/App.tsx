@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Upload, Card, Button, Input, Spin, Tabs, Table, Modal } from "antd";
-import { UploadOutlined, SendOutlined, RobotOutlined } from "@ant-design/icons";
+import { Upload, Card, Button, Input, Spin, Tabs, Table } from "antd";
+import {SendOutlined, RobotOutlined } from "@ant-design/icons";
 import * as pdfjsLib from "pdfjs-dist";
 import pdfjsWorker from "pdfjs-dist/build/pdf.worker?url";
 import localforage from "localforage";
@@ -41,7 +41,7 @@ const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState("interviewee");
   const [messages, setMessages] = useState<{ sender: string; text: string }[]>([]);
   const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false);
+  // const [loading, setLoading] = useState(false);
   const [resumeData, setResumeData] = useState<{ name: string; email: string; phone: string; fullText: string }>({
     name: "",
     email: "",
