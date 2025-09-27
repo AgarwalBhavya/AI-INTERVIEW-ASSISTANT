@@ -41,7 +41,7 @@ const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState("interviewee");
   const [messages, setMessages] = useState<{ sender: string; text: string }[]>([]);
   const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [loading] = useState(false);
   const [resumeData, setResumeData] = useState<{ name: string; email: string; phone: string; fullText: string }>({
     name: "",
     email: "",
